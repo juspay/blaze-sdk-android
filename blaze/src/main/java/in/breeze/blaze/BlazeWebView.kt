@@ -10,14 +10,17 @@ import android.net.Uri
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.core.net.toUri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.Collections
+import androidx.core.content.edit
 
 
 internal class BlazeWebView @SuppressLint(
@@ -37,11 +40,32 @@ internal class BlazeWebView @SuppressLint(
   private val sharedPreferences: SharedPreferences
   private val baseUrl: String = getBaseUrl(initiatePayload)
 
+  private val blazeWebViewClient = object : WebViewClient() {
+
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+        val url = request?.url
+        if (url != null && isUPIIntentUri(url)) {
+            openApp(url.toString())
+            return true
+        }
+        return false
+    }
+
+    @Deprecated("Required for API < 24 compatibility")
+    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+        if (url != null && isUPIIntentUri(url.toUri())) {
+            openApp(url)
+            return true
+        }
+        return false
+    }
+  }
+
   init {
     this.webView.settings.javaScriptEnabled = true
     this.webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
     this.webView.settings.domStorageEnabled = true
-    this.webView.webViewClient = WebViewClient()
+    this.webView.webViewClient = blazeWebViewClient
     this.webView.addJavascriptInterface(this, "Native")
     this.webView.loadUrl(baseUrl)
     this.sendEvent("initiate", this.initiatePayload)
@@ -193,9 +217,9 @@ internal class BlazeWebView @SuppressLint(
 
   private fun saveToStorage(key: String, value: String): Boolean {
     try {
-      val editor = sharedPreferences.edit()
-      editor.putString(key, value)
-      editor.apply()
+        sharedPreferences.edit() {
+            putString(key, value)
+        }
       return true
     } catch (e: Exception) {
       Log.e("BlazeSDK: Failure: ", e.message.toString())
@@ -216,7 +240,7 @@ internal class BlazeWebView @SuppressLint(
     intentUri: String
   ): String {
     try {
-      val intent = Intent(Intent.ACTION_VIEW, Uri.parse(intentUri))
+      val intent = Intent(Intent.ACTION_VIEW, intentUri.toUri())
       contextRef.get()?.startActivityForResult(intent, 0)
       return "Successfully triggered intent"
     } catch (e: Exception) {
@@ -230,7 +254,7 @@ internal class BlazeWebView @SuppressLint(
 
     if (pm !== null) {
       val upiApps = Intent()
-      upiApps.setData(Uri.parse(payload))
+      upiApps.setData(payload.toUri())
       val launchables: List<ResolveInfo> = pm.queryIntentActivities(upiApps, 0)
       Collections.sort(launchables, ResolveInfo.DisplayNameComparator(pm))
       for (resolveInfo in launchables) {
