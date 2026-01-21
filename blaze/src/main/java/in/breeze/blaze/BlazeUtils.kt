@@ -32,9 +32,8 @@ fun isUPIIntentUri(uri: Uri): Boolean {
 
     val hasPayeeAddress = queryParams["pa"]?.isNotBlank() == true
     val hasPayeeName = queryParams["pn"]?.isNotBlank() == true
-    val hasCurrency = queryParams["cu"]?.isNotBlank() == true
     val hasAmount = queryParams["am"]?.isNotBlank() == true
     val isKnownScheme = scheme in BlazeConstants.UPI_SCHEMES
 
-    return hasPayeeAddress && hasPayeeName && hasCurrency && hasAmount && isKnownScheme
+    return hasPayeeAddress && hasPayeeName && hasAmount && isKnownScheme
 }
