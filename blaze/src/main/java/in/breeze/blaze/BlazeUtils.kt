@@ -14,13 +14,13 @@ fun safeParseJson(jsonString: String): JSONObject {
 fun getBaseUrl(payload: JSONObject): String {
     val environment = payload.optJSONObject("payload")?.optString("environment") ?: "release"
     return if (environment == "smbBeta") {
-        "https://app.beta.breezesdk.store"
+        "https://app.beta.v2.breezesdk.store"
     } else if (environment == "smbRelease") {
-        "https://app.breezesdk.store"
+        "https://app.v2.breezesdk.store"
     } else if (environment == "beta") {
-        "https://app.beta.breeze.in"
+        "https://app.beta.v2.breeze.in"
     } else {
-        "https://app.breeze.in"
+        "https://app.v2.breeze.in"
     }
 }
 
