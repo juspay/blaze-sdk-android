@@ -29,6 +29,9 @@ android {
     jvmTarget = "1.8"
     languageVersion = "1.8"
   }
+  publishing {
+    singleVariant("release")
+  }
 }
 
 dependencies {
@@ -43,12 +46,19 @@ afterEvaluate {
       create<MavenPublication>("maven") {
         groupId = "in.breeze"
         artifactId = "blaze"
-        version = "0.0.8-alpha"
-        artifact(layout.buildDirectory.file("outputs/aar/blaze-release.aar"))
+        version = project.version.toString().takeIf { it != "unspecified" } ?: "LOCAL-SNAPSHOT"
+        from(components["release"])
       }
     }
-  }
-  tasks.named("publishMavenPublicationToMavenLocal").configure {
-    dependsOn("bundleReleaseAar")
+    repositories {
+      maven {
+        name = "GitHubPackages"
+        url = uri("https://maven.pkg.github.com/juspay/blaze-sdk-android")
+        credentials {
+          username = System.getenv("GITHUB_ACTOR")
+          password = System.getenv("GITHUB_TOKEN")
+        }
+      }
+    }
   }
 }
