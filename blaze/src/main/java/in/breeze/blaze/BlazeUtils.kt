@@ -21,6 +21,10 @@ fun getService(payload: JSONObject): String {
 }
 
 fun getBaseUrl(payload: JSONObject): String {
+    if (getService(payload) == "in.breeze.shop") {
+        return "https://shop.breeze.in/sdk"
+    }
+
     val environment = getEnvironment(payload)
     return if (environment == "smbBeta") {
         "https://app.beta.v2.breezesdk.store"
