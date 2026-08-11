@@ -20,6 +20,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicReference
 import androidx.core.content.edit
 
 
@@ -38,7 +39,8 @@ internal class BlazeWebView @SuppressLint(
   private var consumingBackPress: Boolean = false
   private var eventQueue: HashMap<String, JSONObject> = hashMapOf()
   private val sharedPreferences: SharedPreferences
-  private val baseUrl: String = getBaseUrl(initiatePayload)
+  private var baseUrl: String = getBaseUrl(initiatePayload)
+  private val frameLoadTarget: AtomicReference<BlazeWebView?> = AtomicReference(this)
 
   private val blazeWebViewClient = object : WebViewClient() {
 
@@ -62,14 +64,35 @@ internal class BlazeWebView @SuppressLint(
   }
 
   init {
+    this.sharedPreferences =
+      context.getSharedPreferences(BlazeConstants.SHARED_PREF_NAME, Context.MODE_PRIVATE)
     this.webView.settings.javaScriptEnabled = true
     this.webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
     this.webView.settings.domStorageEnabled = true
     this.webView.webViewClient = blazeWebViewClient
     this.webView.addJavascriptInterface(this, "Native")
-    this.webView.loadUrl(baseUrl)
     this.sendEvent("initiate", this.initiatePayload)
-    this.sharedPreferences = context.getSharedPreferences("BlazeSharedPref", Context.MODE_PRIVATE)
+    this.loadFrame(context)
+  }
+
+  private fun loadFrame(context: Activity) {
+    val target = frameLoadTarget
+    BlazeConfig.resolveFrameUrl(
+      context,
+      getService(initiatePayload),
+      getEnvironment(initiatePayload)
+    ) { frameUrl -> target.getAndSet(null)?.renderFrame(frameUrl) }
+  }
+
+  private fun renderFrame(frameUrl: String?) {
+    if (frameUrl != null) {
+      baseUrl = frameUrl
+    }
+    val activity = contextRef.get() ?: return
+    if (activity.isFinishing || activity.isDestroyed) {
+      return
+    }
+    activity.runOnUiThread { webView.loadUrl(baseUrl) }
   }
 
 
@@ -94,6 +117,7 @@ internal class BlazeWebView @SuppressLint(
   }
 
   fun terminate() {
+    frameLoadTarget.set(null)
     this.sendEvent("terminate", JSONObject())
     hideView()
     contextRef.get()?.runOnUiThread {

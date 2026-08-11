@@ -12,18 +12,16 @@ typealias CallbackFn = (event: JSONObject) -> Unit;
 class Blaze {
 
   private var webView: BlazeWebView? = null;
-  private lateinit var context: Activity;
   private var contextRef: WeakReference<Activity>? = null;
   private var callbackFn: CallbackFn? = null;
   private var isInitialized: Boolean = false;
 
   fun initiate(context: Activity, initiatePayload: JSONObject, callbackFn: CallbackFn) {
-    this.context = context
     this.contextRef = WeakReference(context)
     this.callbackFn = callbackFn;
     if (!isInitialized) {
       context.runOnUiThread {
-        this.webView = BlazeWebView(this.context, initiatePayload, callbackFn)
+        this.webView = BlazeWebView(context, initiatePayload, callbackFn)
       }
       this.isInitialized = true
     }

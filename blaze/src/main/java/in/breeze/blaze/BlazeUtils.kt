@@ -11,8 +11,17 @@ fun safeParseJson(jsonString: String): JSONObject {
     }
 }
 
+fun getEnvironment(payload: JSONObject): String {
+    val environment = payload.optJSONObject("payload")?.optString("environment")
+    return if (environment.isNullOrBlank()) "release" else environment
+}
+
+fun getService(payload: JSONObject): String {
+    return payload.optString("service")
+}
+
 fun getBaseUrl(payload: JSONObject): String {
-    val environment = payload.optJSONObject("payload")?.optString("environment") ?: "release"
+    val environment = getEnvironment(payload)
     return if (environment == "smbBeta") {
         "https://app.beta.v2.breezesdk.store"
     } else if (environment == "smbRelease") {
