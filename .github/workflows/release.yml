@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version override (e.g. 0.0.21-alpha). Leave empty to derive from commit messages."
+        description: "Version override (e.g. 1.0.1). Leave empty to derive from commit messages."
         required: false
         type: string
 
@@ -85,7 +85,7 @@ jobs:
           fi
 
           if ! echo "$VERSION" | grep -Eq "$SEMVER_RE"; then
-            echo "::error::Version '$VERSION' is not valid semver (expected e.g. 0.0.21-alpha)"
+            echo "::error::Version '$VERSION' is not valid semver (expected e.g. 1.0.1)"
             exit 1
           fi
 
