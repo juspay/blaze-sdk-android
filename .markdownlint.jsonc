@@ -1,0 +1,5 @@
+// Markdown lint rules for this repo. Line length is off: prose and code samples run long.
+{
+  "default": true,
+  "MD013": false
+}
