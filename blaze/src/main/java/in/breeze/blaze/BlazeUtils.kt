@@ -36,6 +36,19 @@ fun getBaseUrl(payload: JSONObject): String {
         "https://app.v2.breeze.in"
     }
 }
+internal fun originOf(url: String?): String? {
+    if (url.isNullOrBlank()) {
+        return null
+    }
+    val uri = Uri.parse(url)
+    val scheme = uri.scheme?.lowercase() ?: return null
+    val host = uri.host?.lowercase() ?: return null
+    if (scheme != "https" || host.isEmpty()) {
+        return null
+    }
+    val port = if (uri.port == -1 || uri.port == 443) "" else ":${uri.port}"
+    return "$scheme://$host$port"
+}
 
 fun isUPIIntentUri(uri: Uri): Boolean {
     val scheme = uri.scheme?.lowercase() ?: return false

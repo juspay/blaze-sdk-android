@@ -11,4 +11,6 @@ internal object BlazeConstants {
     const val SDK_CONFIG_URL = "https://sdk.breeze.in/core/sdk.json"
     const val SDK_CONFIG_KEY = "blazeSdkConfig"
     const val SDK_CONFIG_TIMEOUT_MS = 3000
+    const val SHOP_SERVICE = "in.breeze.shop"
+    const val LAUNCH_ACTION = "launch"
 }

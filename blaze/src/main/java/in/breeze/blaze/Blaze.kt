@@ -16,12 +16,15 @@ class Blaze {
   private var callbackFn: CallbackFn? = null;
   private var isInitialized: Boolean = false;
 
+  internal var createWebView: (context: Activity, initiatePayload: JSONObject, callbackFn: CallbackFn) -> BlazeWebView =
+    { context, initiatePayload, callbackFn -> BlazeWebView(context, initiatePayload, callbackFn) }
+
   fun initiate(context: Activity, initiatePayload: JSONObject, callbackFn: CallbackFn) {
     this.contextRef = WeakReference(context)
     this.callbackFn = callbackFn;
     if (!isInitialized) {
       context.runOnUiThread {
-        this.webView = BlazeWebView(context, initiatePayload, callbackFn)
+        this.webView = createWebView(context, initiatePayload, callbackFn)
       }
       this.isInitialized = true
     }
@@ -29,6 +32,19 @@ class Blaze {
 
   fun process(payload: JSONObject) {
     this.webView?.process(payload)
+  }
+
+  fun launch(activity: Activity, request: BlazeLaunchRequest, onResult: (BlazeLaunchResult) -> Unit) {
+    val webView = this.webView
+    if (!isInitialized || webView == null || webView.service != BlazeConstants.SHOP_SERVICE) {
+      onResult(BlazeLaunchResult.Failed(BlazeLaunchError.E_NOT_INITIALISED))
+      return
+    }
+    if (!request.isValid) {
+      onResult(BlazeLaunchResult.Failed(BlazeLaunchError.E_LAUNCH_INVALID))
+      return
+    }
+    webView.launch(activity, request, onResult)
   }
 
   fun handleBackPress(): Boolean {

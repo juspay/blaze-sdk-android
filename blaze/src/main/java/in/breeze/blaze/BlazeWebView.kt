@@ -4,9 +4,12 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.MutableContextWrapper
 import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
@@ -20,9 +23,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.Collections
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 import androidx.core.content.edit
 
+internal typealias FrameUrlResolver =
+  (context: Activity, service: String, environment: String, callback: (frameUrl: String?) -> Unit) -> Unit
+internal typealias ScriptRunner = (webView: WebView, script: String) -> Unit
 
 internal class BlazeWebView @SuppressLint(
   "SetJavaScriptEnabled",
@@ -30,17 +37,42 @@ internal class BlazeWebView @SuppressLint(
 ) constructor(
   context: Activity,
   private val initiatePayload: JSONObject,
-  private val callbackFn: CallbackFn
+  private val callbackFn: CallbackFn,
+  private val resolveFrameUrl: FrameUrlResolver = { activity, service, environment, callback ->
+    BlazeConfig.resolveFrameUrl(activity, service, environment, callback)
+  },
+  private val runScript: ScriptRunner = { view, script -> view.evaluateJavascript(script) {} }
 ) {
 
-  private val contextRef: WeakReference<Activity> = WeakReference(context)
-  private val webView: WebView = WebView(context)
-  private var isWebViewReady: Boolean = false
+  private val contextWrapper: MutableContextWrapper = MutableContextWrapper(context)
+  @Volatile
+  private var contextRef: WeakReference<Activity> = WeakReference(context)
+  internal val webView: WebView = WebView(contextWrapper)
+  internal val service: String = getService(initiatePayload)
   private var consumingBackPress: Boolean = false
-  private var eventQueue: HashMap<String, JSONObject> = hashMapOf()
   private val sharedPreferences: SharedPreferences
   private var baseUrl: String = getBaseUrl(initiatePayload)
   private val frameLoadTarget: AtomicReference<BlazeWebView?> = AtomicReference(this)
+
+  private val lock = Any()
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private var isWebViewReady: Boolean = false
+  private val eventQueue: ArrayDeque<Pair<String, JSONObject>> = ArrayDeque()
+  private var journey: Journey? = null
+
+  @Volatile
+  private var contentOrigin: String? = null
+
+  private class Journey(
+    val id: String,
+    val onResult: (BlazeLaunchResult) -> Unit,
+    private var launchEvent: JSONObject?
+  ) {
+    var delivered: Boolean = false
+    var settled: Boolean = false
+
+    fun takeLaunchEvent(): JSONObject? = launchEvent.also { launchEvent = null }
+  }
 
   private val blazeWebViewClient = object : WebViewClient() {
 
@@ -77,9 +109,9 @@ internal class BlazeWebView @SuppressLint(
 
   private fun loadFrame(context: Activity) {
     val target = frameLoadTarget
-    BlazeConfig.resolveFrameUrl(
+    resolveFrameUrl(
       context,
-      getService(initiatePayload),
+      service,
       getEnvironment(initiatePayload)
     ) { frameUrl -> target.getAndSet(null)?.renderFrame(frameUrl) }
   }
@@ -92,12 +124,33 @@ internal class BlazeWebView @SuppressLint(
     if (activity.isFinishing || activity.isDestroyed) {
       return
     }
-    activity.runOnUiThread { webView.loadUrl(baseUrl) }
+    activity.runOnUiThread {
+      contentOrigin = originOf(baseUrl)
+      webView.loadUrl(baseUrl)
+    }
   }
 
 
   fun process(payload: JSONObject) {
     this.sendEvent("process", payload)
+  }
+
+  fun launch(activity: Activity, request: BlazeLaunchRequest, onResult: (BlazeLaunchResult) -> Unit) {
+    val journeyId = UUID.randomUUID().toString()
+    val accepted = synchronized(lock) {
+      if (journey != null) {
+        false
+      } else {
+        journey = Journey(journeyId, onResult, launchEventFor(journeyId, request))
+        true
+      }
+    }
+    if (!accepted) {
+      mainHandler.post { onResult(BlazeLaunchResult.Failed(BlazeLaunchError.E_JOURNEY_IN_PROGRESS)) }
+      return
+    }
+    mainHandler.post { rebase(activity) }
+    deliverLaunch()
   }
 
   fun handleBackPress(): Boolean {
@@ -118,14 +171,19 @@ internal class BlazeWebView @SuppressLint(
 
   fun terminate() {
     frameLoadTarget.set(null)
+    val unsettled = synchronized(lock) { journey?.takeIf { !it.settled } }
+    unsettled?.let { settle(it, BlazeLaunchResult.Failed(BlazeLaunchError.E_CONTENT_LOAD_FAILED)) }
     this.sendEvent("terminate", JSONObject())
     hideView()
-    contextRef.get()?.runOnUiThread {
+    mainHandler.post {
       webView.stopLoading()
       webView.removeJavascriptInterface("Native")
       this.webView.destroy()
     }
-    eventQueue.clear()
+    synchronized(lock) {
+      eventQueue.clear()
+      journey = null
+    }
   }
 
 
@@ -137,10 +195,10 @@ internal class BlazeWebView @SuppressLint(
     val eventDataJson = safeParseJson(eventData)
 
     if (eventName == "appReady") {
-      isWebViewReady = true
-      drainEventQueue()
+      onAppReady()
     }
     if (eventName == "callbackEvent") {
+      settleFromResponse(eventDataJson)
       this.callbackFn.invoke(eventDataJson)
     }
 
@@ -157,6 +215,7 @@ internal class BlazeWebView @SuppressLint(
     }
 
     if (eventName == "hideView") {
+      endSettledJourney()
       hideView()
     }
 
@@ -168,26 +227,120 @@ internal class BlazeWebView @SuppressLint(
 
 
   private fun sendEvent(event: String, payload: JSONObject) {
+    synchronized(lock) {
+      if (isWebViewReady) {
+        postScript(event, payload)
+      } else {
+        eventQueue.addLast(event to payload)
+      }
+    }
+  }
+
+  private fun scriptFor(event: String, payload: JSONObject): String {
     val eventMessage =
       JSONObject()
         .put("eventName", event)
         .put("eventData", payload)
         .put("source", "blaze")
-    if (isWebViewReady) {
-      contextRef.get()?.runOnUiThread {
-        webView.evaluateJavascript("javascript:onSDKEvent(JSON.stringify($eventMessage))") {}
+    return "javascript:onSDKEvent(JSON.stringify($eventMessage))"
+  }
+
+  private fun postScript(event: String, payload: JSONObject) {
+    val script = scriptFor(event, payload)
+    mainHandler.post { runScript(webView, script) }
+  }
+
+  private fun onAppReady() {
+    val interrupted = synchronized(lock) {
+      val lost = journey?.takeIf { it.delivered && !it.settled }
+      isWebViewReady = true
+      while (eventQueue.isNotEmpty()) {
+        val (event, payload) = eventQueue.removeFirst()
+        postScript(event, payload)
       }
-    } else {
-      eventQueue[event] = payload
+      lost
+    }
+    interrupted?.let { settle(it, BlazeLaunchResult.Failed(BlazeLaunchError.E_CONTENT_LOAD_FAILED)) }
+    deliverLaunch()
+  }
+
+  private fun deliverLaunch() {
+    synchronized(lock) {
+      val current = journey ?: return
+      if (!isWebViewReady || current.delivered) {
+        return
+      }
+      current.delivered = true
+      mainHandler.post { deliver(current) }
     }
   }
 
-  private fun drainEventQueue() {
-    val pendingEvents = eventQueue.toList()
-    eventQueue.clear()
-    pendingEvents.forEach { (event, payload) ->
-      sendEvent(event, payload)
+  private fun deliver(current: Journey) {
+    val launchEvent = synchronized(lock) {
+      if (journey === current) current.takeLaunchEvent() else null
+    } ?: return
+    val loadedOrigin = originOf(webView.url)
+    if (loadedOrigin == null || loadedOrigin != contentOrigin) {
+      settle(current, BlazeLaunchResult.Failed(BlazeLaunchError.E_CONTENT_LOAD_FAILED))
+      return
     }
+    runScript(webView, scriptFor("process", launchEvent))
+  }
+
+  private fun settleFromResponse(response: JSONObject) {
+    val current = synchronized(lock) { journey } ?: return
+    if (response.optString("requestId") != current.id) {
+      return
+    }
+    val payload = response.optJSONObject("payload") ?: return
+    if (payload.optBoolean("error")) {
+      val error = BlazeLaunchError.fromContentError(payload.optString("errorDetails"))
+      settle(current, BlazeLaunchResult.Failed(error))
+    } else if (payload.optString("event") == "ProcessStarted") {
+      settle(current, BlazeLaunchResult.Started(current.id))
+    }
+  }
+
+  private fun settle(target: Journey, result: BlazeLaunchResult) {
+    synchronized(lock) {
+      if (target.settled) {
+        return
+      }
+      target.settled = true
+      target.takeLaunchEvent()
+      if (result is BlazeLaunchResult.Failed && journey === target) {
+        journey = null
+      }
+    }
+    mainHandler.post { target.onResult(result) }
+  }
+
+  private fun endSettledJourney() {
+    synchronized(lock) {
+      if (journey?.settled == true) {
+        journey = null
+      }
+    }
+  }
+
+  private fun rebase(activity: Activity) {
+    contextWrapper.baseContext = activity
+    contextRef = WeakReference(activity)
+    (webView.parent as? ViewGroup)?.removeView(webView)
+  }
+
+  private fun launchEventFor(journeyId: String, request: BlazeLaunchRequest): JSONObject {
+    val payload = JSONObject()
+      .put("action", BlazeConstants.LAUNCH_ACTION)
+      .put("ottToken", request.oneTimeToken)
+      .put("tenant", request.tenant ?: JSONObject.NULL)
+      .put("deviceBinding", request.deviceBinding ?: JSONObject.NULL)
+      .put("entryPoint", request.entryPoint ?: JSONObject.NULL)
+      .put("searchText", request.searchText ?: JSONObject.NULL)
+    return JSONObject()
+      .put("requestId", journeyId)
+      .put("service", BlazeConstants.SHOP_SERVICE)
+      .put("payload", payload)
   }
 
   private fun renderView() {
