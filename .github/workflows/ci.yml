@@ -20,6 +20,9 @@ jobs:
       - name: Build
         run: ./gradlew clean -Pgroup=com.github.juspay -Pversion=0.0.0-ci -xtest -xlint assemble publishToMavenLocal
 
+      - name: Unit tests
+        run: ./gradlew :blaze:testDebugUnitTest
+
   readme:
     runs-on: ubuntu-latest
     steps:

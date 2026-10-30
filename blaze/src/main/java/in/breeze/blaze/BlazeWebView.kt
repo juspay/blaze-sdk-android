@@ -2,22 +2,30 @@ package `in`.breeze.blaze
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
 import android.net.Uri
+import android.net.http.SslError
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.SslErrorHandler
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.core.net.toUri
+import `in`.breeze.blaze.security.NavigationDecision
+import `in`.breeze.blaze.security.NavigationPolicy
+import `in`.breeze.blaze.security.WebViewHardening
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicReference
@@ -40,12 +48,19 @@ internal class BlazeWebView @SuppressLint(
   private var eventQueue: HashMap<String, JSONObject> = hashMapOf()
   private val sharedPreferences: SharedPreferences
   private var baseUrl: String = getBaseUrl(initiatePayload)
+  private val isLocked: Boolean = getService(initiatePayload) == BlazeConstants.SHOP_SERVICE
+  private val allowList: Set<String> =
+    if (isLocked) setOfNotNull(getContentOrigin(initiatePayload)) else emptySet()
+  private val dropExternalLinks: Boolean = dropsExternalLinks(initiatePayload)
   private val frameLoadTarget: AtomicReference<BlazeWebView?> = AtomicReference(this)
 
   private val blazeWebViewClient = object : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
         val url = request?.url
+        if (isLocked) {
+            return url == null || enforceNavigation(url.toString(), request.isForMainFrame)
+        }
         if (url != null && isUPIIntentUri(url)) {
             openApp(url.toString())
             return true
@@ -55,11 +70,34 @@ internal class BlazeWebView @SuppressLint(
 
     @Deprecated("Required for API < 24 compatibility")
     override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+        if (isLocked) {
+            return url == null || enforceNavigation(url, true)
+        }
         if (url != null && isUPIIntentUri(url.toUri())) {
             openApp(url)
             return true
         }
         return false
+    }
+
+    override fun shouldInterceptRequest(
+        view: WebView?,
+        request: WebResourceRequest?
+    ): WebResourceResponse? {
+        if (!isLocked || request == null || !request.isForMainFrame) {
+            return null
+        }
+        val decision = NavigationPolicy.decide(request.url.toString(), true, allowList, dropExternalLinks)
+        if (decision == NavigationDecision.ALLOW) {
+            return null
+        }
+        return WebResourceResponse(
+            "text/plain", "utf-8", 403, "Forbidden", emptyMap(), ByteArrayInputStream(ByteArray(0))
+        )
+    }
+
+    override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+        handler?.cancel()
     }
   }
 
@@ -69,6 +107,9 @@ internal class BlazeWebView @SuppressLint(
     this.webView.settings.javaScriptEnabled = true
     this.webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
     this.webView.settings.domStorageEnabled = true
+    if (isLocked) {
+      WebViewHardening.apply(this.webView)
+    }
     this.webView.webViewClient = blazeWebViewClient
     this.webView.addJavascriptInterface(this, "Native")
     this.sendEvent("initiate", this.initiatePayload)
@@ -76,6 +117,10 @@ internal class BlazeWebView @SuppressLint(
   }
 
   private fun loadFrame(context: Activity) {
+    if (isLocked) {
+      renderFrame(null)
+      return
+    }
     val target = frameLoadTarget
     BlazeConfig.resolveFrameUrl(
       context,
@@ -85,9 +130,12 @@ internal class BlazeWebView @SuppressLint(
   }
 
   private fun renderFrame(frameUrl: String?) {
-    if (frameUrl != null) {
-      baseUrl = frameUrl
+    val url = frameUrl ?: baseUrl
+    if (isLocked && NavigationPolicy.originOf(url) !in allowList) {
+      reportError(BlazeConstants.INVALID_CONTENT_ORIGIN)
+      return
     }
+    baseUrl = url
     val activity = contextRef.get() ?: return
     if (activity.isFinishing || activity.isDestroyed) {
       return
@@ -104,7 +152,11 @@ internal class BlazeWebView @SuppressLint(
     if (consumingBackPress) {
       contextRef.get()?.runOnUiThread {
         val currentPageUrl = webView.url
-        val isBreezePage = currentPageUrl?.contains(baseUrl) ?: false
+        val isBreezePage = if (isLocked) {
+          currentPageUrl != null && NavigationPolicy.originOf(currentPageUrl) in allowList
+        } else {
+          currentPageUrl?.contains(baseUrl) ?: false
+        }
         if (isBreezePage) {
           this.sendEvent("backPress", JSONObject())
         } else if (webView.canGoBack()) {
@@ -180,6 +232,37 @@ internal class BlazeWebView @SuppressLint(
     } else {
       eventQueue[event] = payload
     }
+  }
+
+  private fun enforceNavigation(url: String, isMainFrame: Boolean): Boolean {
+    return when (NavigationPolicy.decide(url, isMainFrame, allowList, dropExternalLinks)) {
+      NavigationDecision.ALLOW -> false
+      NavigationDecision.OPEN_EXTERNAL -> {
+        openInBrowser(url)
+        true
+      }
+      NavigationDecision.BLOCK -> true
+    }
+  }
+
+  private fun openInBrowser(url: String) {
+    try {
+      val intent = Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE)
+      contextRef.get()?.startActivity(intent)
+    } catch (e: ActivityNotFoundException) {
+      Log.e("BlazeSDK: browser: ", e.message.toString())
+    }
+  }
+
+  private fun reportError(errorDetails: String) {
+    val response = JSONObject()
+      .put("requestId", initiatePayload.optString("requestId"))
+      .put("service", getService(initiatePayload))
+      .put(
+        "payload",
+        JSONObject().put("eventName", "error").put("error", true).put("errorDetails", errorDetails)
+      )
+    this.callbackFn.invoke(response)
   }
 
   private fun drainEventQueue() {
