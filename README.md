@@ -6,7 +6,7 @@ The Blaze SDK is an easy-to-use toolkit that allows you to effortlessly integrat
 
 Follow the below steps to integrate Blaze SDK into your android application:
 
-These steps open one-click checkout (`in.breeze.onecco`). For the shop assistant (`in.breeze.shop`), see [Shop assistant](#shop-assistant).
+These steps open one-click checkout (`in.breeze.onecco`). For agentic commerce (`in.breeze.shop`), see [Agentic commerce](#agentic-commerce).
 
 ### Step 1: Obtaining the Blaze SDK
 
@@ -31,8 +31,6 @@ dependencies {
   implementation("com.github.juspay:blaze-sdk-android:<version>")
 }
 ```
-
-The SDK's manifest is merged into your app's manifest. It adds the `INTERNET` permission and a `<queries>` entry for `upi://pay`, which lets the SDK find UPI payment apps. You don't need to add either yourself.
 
 ### Step 2: Initialize the SDK
 
@@ -79,7 +77,7 @@ You need to implement this method in order to handle the result of the SDK opera
 
 The callback receives a JSON object with `requestId`, `service` and `payload`. `payload.eventName` names the event: the first is `initiate`, in answer to your `initiate` call, and the rest depend on the service and the journey.
 
-If the SDK could not read your payload, or an action failed, `payload.error` is `true` and `payload.errorDetails` says why.
+When something fails, `payload.error` is `true` and `payload.errorDetails` describes the failure for your logs. If the failure has a code, `payload.errorCode` names it; see [Error codes](docs/error-codes.md).
 
 The SDK calls the callback on a background thread. Switch to the main thread before updating your UI, for example with `runOnUiThread`.
 
@@ -212,11 +210,11 @@ blaze.terminate()
 
 `Blaze` also has `onActivityResult` and `onRequestPermissionsResult` methods. They are kept for compatibility and do nothing, so you don't need to forward these lifecycle callbacks to the Blaze instance.
 
-### Shop assistant
+### Agentic commerce
 
-The shop assistant (`in.breeze.shop`) is Breeze's shopping chat: inside it the shopper searches for products, builds a cart and checks out. You open it with the same `Blaze` calls as one-click checkout (`initiate`, `process`, `handleBackPress`, `terminate`); only the payloads, and what comes back, differ.
+Agentic commerce (`in.breeze.shop`) lets the shopper search for products, build a cart and check out, all inside your app. You open it with the same `Blaze` calls as one-click checkout (`initiate`, `process`, `handleBackPress`, `terminate`); only the payloads, and what comes back, differ.
 
-#### Initiate the shop assistant
+#### Prepare it with `initiate`
 
 ```kotlin
 val initiatePayload = JSONObject()
@@ -235,13 +233,15 @@ blaze.initiate(this, initSDKPayload, ::blazeCallbackHandler)
 | Key | Required | Value |
 | --- | --- | --- |
 | `publisherId` | Yes | Your publisher id, from the Breeze team |
-| `environment` | No | `beta` or `release`; picks which version of the assistant loads. Defaults to `release` |
+| `environment` | No | `beta` or `release`. Defaults to `release` |
 
-`merchantId` and `shopUrl` are not used. `initiate` shows nothing on screen: it loads the assistant in the background, so it opens quickly later. The callback then receives `eventName: "initiate"` with `status: "success"`, or `error: true` with the reason in `errorDetails`, for example `Missing publisherId in initiate payload`.
+Nothing appears yet: `initiate` prepares everything in the background, so the shopper sees it instantly when you open it. `merchantId` and `shopUrl` aren't needed.
 
-#### Open the assistant
+Your callback then gets `eventName: "initiate"` with `status: "success"`. If something is wrong, it gets `error: true` instead, with the reason in `errorDetails`, for example `Missing publisherId in initiate payload`.
 
-Once the `initiate` answer has arrived, call `process` to open the assistant full screen:
+#### Open it with `process`
+
+Once the `initiate` answer has arrived, call `process`. It opens full screen.
 
 ```kotlin
 val processPayload = JSONObject()
@@ -255,22 +255,20 @@ processSDKPayload.put("payload", processPayload)
 blaze.process(processSDKPayload)
 ```
 
-The callback receives `eventName: "eventStream"` with `payload.event` set to `ProcessStarted`.
+Your callback gets `eventName: "eventStream"` with `payload.event` set to `ProcessStarted`.
 
-#### What your app receives from the shop assistant
+#### What your callback receives
 
-| `payload.eventName` | When it is sent |
+| `payload.eventName` | Means |
 | --- | --- |
-| `initiate` | In answer to `initiate` |
-| `eventStream`, with `payload.event` `ProcessStarted` | When the assistant opens, in answer to `process` |
-| `process`, with `error: true` | When the `process` payload could not be read |
-
-The assistant does not yet send events for the shopper's steps, or a `processResult` when the journey ends. When the shopper closes it, with its close button or a back press on its first screen, the SDK hides it but your app gets no callback. Call `process` again to reopen it.
+| `initiate` | The answer to `initiate`: ready, or an error |
+| `eventStream` with `payload.event` `ProcessStarted` | It opened, in answer to `process` |
+| `process` with `error: true` | The `process` payload couldn't be read |
 
 #### Back press and terminate
 
-These work as in Steps 4 and 5. A back press takes the assistant back one screen, and closes it when there is nothing to go back to. `terminate` removes it; call `initiate` again before you open it next time.
+These work as in Steps 4 and 5. Back takes the shopper one screen back, and closes it from the first screen. After `terminate`, call `initiate` again before you open it.
 
-## Platform notes
+### Error codes
 
-What the SDK does inside your app (the network requests it makes, permissions, the methods the page can call, the data it stores and its size) is described in [Platform notes](docs/platform-notes.md).
+The error codes the SDK sends are listed in [Error codes](docs/error-codes.md).
