@@ -37,6 +37,37 @@ fun getBaseUrl(payload: JSONObject): String {
     }
 }
 
+internal fun sdkErrorResponse(
+    request: JSONObject,
+    eventName: String,
+    error: BlazeErrorCodes,
+    errorDetails: String
+): JSONObject {
+    val payload = JSONObject()
+        .put("eventName", eventName)
+        .put("action", JSONObject.NULL)
+        .put("status", JSONObject.NULL)
+        .put("methodName", JSONObject.NULL)
+        .put("params", JSONObject.NULL)
+        .put("event", JSONObject.NULL)
+        .put("error", true)
+        .put("errorDetails", errorDetails)
+        .put("errorCode", error.code)
+    return JSONObject()
+        .put("requestId", request.optString("requestId"))
+        .put("service", getService(request))
+        .put("payload", payload)
+}
+
+internal fun notInitialisedResponse(processPayload: JSONObject): JSONObject {
+    return sdkErrorResponse(
+        processPayload,
+        "process",
+        BlazeErrorCodes.NOT_INITIALISED,
+        "Call process after initiate"
+    )
+}
+
 fun isUPIIntentUri(uri: Uri): Boolean {
     val scheme = uri.scheme?.lowercase() ?: return false
     val queryParams = uri.queryParameterNames.associateBy(

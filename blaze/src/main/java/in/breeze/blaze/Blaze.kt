@@ -28,7 +28,12 @@ class Blaze {
   }
 
   fun process(payload: JSONObject) {
-    this.webView?.process(payload)
+    val webView = this.webView
+    if (webView != null) {
+      webView.process(payload)
+    } else {
+      this.callbackFn?.invoke(notInitialisedResponse(payload))
+    }
   }
 
   fun handleBackPress(): Boolean {
