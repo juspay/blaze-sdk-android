@@ -1,6 +1,7 @@
 package `in`.breeze.blaze
 
 import android.net.Uri
+import `in`.breeze.blaze.security.NavigationPolicy
 import org.json.JSONObject
 
 fun safeParseJson(jsonString: String): JSONObject {
@@ -20,9 +21,18 @@ fun getService(payload: JSONObject): String {
     return payload.optString("service")
 }
 
+fun dropsExternalLinks(payload: JSONObject): Boolean {
+    return payload.optJSONObject("payload")?.optBoolean("dropExternalLinks") == true
+}
+
+fun getContentOrigin(payload: JSONObject): String? {
+    val contentOrigin = payload.optJSONObject("payload")?.optString("contentOrigin") ?: return null
+    return NavigationPolicy.originOf(contentOrigin)
+}
+
 fun getBaseUrl(payload: JSONObject): String {
-    if (getService(payload) == "in.breeze.shop") {
-        return "https://shop.breeze.in/sdk"
+    if (getService(payload) == BlazeConstants.SHOP_SERVICE) {
+        return (getContentOrigin(payload) ?: "") + BlazeConstants.SHOP_FRAME_PATH
     }
 
     val environment = getEnvironment(payload)
