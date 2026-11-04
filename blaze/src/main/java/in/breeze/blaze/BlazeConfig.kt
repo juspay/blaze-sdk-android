@@ -11,6 +11,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 
+internal class RemoteFrame(val frameUrl: String?, val allowedOrigins: List<String>?)
+
 internal object BlazeConfig {
 
   private val executor = Executors.newSingleThreadExecutor()
@@ -26,13 +28,13 @@ internal object BlazeConfig {
     context: Context,
     service: String,
     environment: String,
-    callback: (frameUrl: String?) -> Unit
+    callback: (remote: RemoteFrame?) -> Unit
   ) {
     val appContext = context.applicationContext
 
     val inMemoryConfig = cachedConfig
     if (inMemoryConfig != null) {
-      callback(frameUrlFor(inMemoryConfig, service, environment))
+      callback(remoteFrameFor(inMemoryConfig, service, environment))
       refresh(appContext)
       return
     }
@@ -43,9 +45,22 @@ internal object BlazeConfig {
         cachedConfig = persistedConfig
       }
       val config = persistedConfig ?: fetchAndStore(appContext)
-      mainHandler.post { callback(config?.let { frameUrlFor(it, service, environment) }) }
-      refresh(appContext)
+      mainHandler.post { callback(config?.let { remoteFrameFor(it, service, environment) }) }
+      if (persistedConfig != null) {
+        refresh(appContext)
+      }
     }
+  }
+
+  private fun remoteFrameFor(config: JSONObject, service: String, environment: String): RemoteFrame {
+    val origins = config.optJSONObject("services")
+      ?.optJSONObject(service)
+      ?.optJSONObject("allowedOrigins")
+      ?.optJSONArray(environment)
+    return RemoteFrame(
+      frameUrlFor(config, service, environment),
+      origins?.let { list -> (0 until list.length()).map { list.optString(it) } }
+    )
   }
 
   private fun refresh(context: Context) {
@@ -71,6 +86,7 @@ internal object BlazeConfig {
     } catch (e: Exception) {
       Log.e("BlazeSDK: config: ", e.message.toString())
     }
+    hasFetched = false
     return cachedConfig
   }
 

@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.net.Uri
 import android.util.Log
@@ -13,6 +14,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -20,8 +22,10 @@ import android.widget.FrameLayout
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import `in`.breeze.blaze.security.WebViewHardening
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicReference
@@ -53,27 +57,49 @@ internal class BlazeWebView @SuppressLint(
   private var consumingBackPress: Boolean = false
   private var eventQueue: HashMap<String, JSONObject> = hashMapOf()
   private val sharedPreferences: SharedPreferences
-  private var baseUrl: String = getBaseUrl(initiatePayload)
+  @Volatile
+  private var frame: FrameMode = FrameMode.Unlocked(getBaseUrl(initiatePayload))
   private val frameLoadTarget: AtomicReference<BlazeWebView?> = AtomicReference(this)
 
   private val blazeWebViewClient = object : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-        val url = request?.url
-        if (url != null && isUPIIntentUri(url)) {
-            openApp(url.toString())
-            return true
-        }
-        return false
+        return handleNavigation(request?.url?.toString(), request?.isForMainFrame ?: true)
     }
 
     @Deprecated("Required for API < 24 compatibility")
     override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-        if (url != null && isUPIIntentUri(url.toUri())) {
-            openApp(url)
-            return true
-        }
-        return false
+        return handleNavigation(url)
+    }
+
+    override fun shouldInterceptRequest(
+      view: WebView?,
+      request: WebResourceRequest?
+    ): WebResourceResponse? {
+      if (request == null || !request.isForMainFrame) {
+        return null
+      }
+      if (frame.allows(request.url.toString())) {
+        return null
+      }
+      Log.w("BlazeSDK: navigation: ", "Blocked ${request.method} to ${originForLog(request.url.toString())}")
+      returnToAllowedPage()
+      return WebResourceResponse(
+        "text/plain",
+        "utf-8",
+        403,
+        "Forbidden",
+        emptyMap(),
+        ByteArrayInputStream(ByteArray(0))
+      )
+    }
+
+    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+      super.onPageStarted(view, url, favicon)
+      if (url != null && !frame.allows(url)) {
+        Log.w("BlazeSDK: navigation: ", "Blocked page load on ${originForLog(url)}")
+        returnToAllowedPage()
+      }
     }
   }
 
@@ -84,6 +110,7 @@ internal class BlazeWebView @SuppressLint(
     this.webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
     this.webView.settings.domStorageEnabled = true
     this.webView.setBackgroundColor(Color.TRANSPARENT)
+    WebViewHardening.apply(this.webView)
     this.webView.webViewClient = blazeWebViewClient
     this.webView.addJavascriptInterface(this, "Native")
     ViewCompat.setOnApplyWindowInsetsListener(this.webView) { view, insets ->
@@ -101,31 +128,43 @@ internal class BlazeWebView @SuppressLint(
       context,
       getService(initiatePayload),
       getEnvironment(initiatePayload)
-    ) { frameUrl -> target.getAndSet(null)?.renderFrame(frameUrl) }
+    ) { remote -> target.getAndSet(null)?.renderFrame(remote) }
   }
 
-  private fun renderFrame(frameUrl: String?) {
-    if (frameUrl != null) {
-      baseUrl = frameUrl
+  private fun renderFrame(remote: RemoteFrame?) {
+    val resolved = FrameMode.resolve(remote, getBaseUrl(initiatePayload))
+    frame = resolved
+    if (resolved is FrameMode.Failed) {
+      reportError("initiate", initiatePayload, resolved.failure)
+      contextRef.get()?.runOnUiThread {
+        eventQueue.remove("process")?.let { reportError("process", it, resolved.failure) }
+      }
+      return
     }
+    val url = resolved.url ?: return
     val activity = contextRef.get() ?: return
     if (activity.isFinishing || activity.isDestroyed) {
       return
     }
-    activity.runOnUiThread { webView.loadUrl(baseUrl) }
+    activity.runOnUiThread { webView.loadUrl(url) }
   }
 
 
   fun process(payload: JSONObject) {
-    this.sendEvent("process", payload)
+    contextRef.get()?.runOnUiThread {
+      val current = frame
+      if (current is FrameMode.Failed) {
+        reportError("process", payload, current.failure)
+      } else {
+        this.sendEvent("process", payload)
+      }
+    }
   }
 
   fun handleBackPress(): Boolean {
     if (consumingBackPress) {
       contextRef.get()?.runOnUiThread {
-        val currentPageUrl = webView.url
-        val isBreezePage = currentPageUrl?.contains(baseUrl) ?: false
-        if (isBreezePage) {
+        if (frame.isFramePage(webView.url)) {
           this.sendEvent("backPress", JSONObject())
         } else if (webView.canGoBack()) {
           webView.goBack()
@@ -201,6 +240,48 @@ internal class BlazeWebView @SuppressLint(
         eventQueue[event] = payload
       }
     }
+  }
+
+  private fun handleNavigation(url: String?, isMainFrame: Boolean = true): Boolean {
+    if (url == null) {
+      return frame !is FrameMode.Unlocked
+    }
+    if (isUPIIntentUri(url.toUri())) {
+      openApp(url)
+      return true
+    }
+    if (!isMainFrame || frame.allows(url)) {
+      return false
+    }
+    Log.w("BlazeSDK: navigation: ", "Blocked link to ${originForLog(url)}")
+    return true
+  }
+
+  private fun originForLog(url: String): String {
+    val uri = url.toUri()
+    return "${uri.scheme}://${uri.host}"
+  }
+
+  private fun returnToAllowedPage() {
+    contextRef.get()?.runOnUiThread {
+      if (isTerminated) {
+        return@runOnUiThread
+      }
+      webView.stopLoading()
+      val currentUrl = webView.url
+      if (currentUrl == null || frame.allows(currentUrl)) {
+        return@runOnUiThread
+      }
+      frame.url?.let { webView.loadUrl(it) }
+    }
+  }
+
+  private fun canOpenApp(intentUri: String): Boolean {
+    return frame is FrameMode.Unlocked || isUPIIntentUri(intentUri.toUri())
+  }
+
+  private fun reportError(eventName: String, request: JSONObject, failure: FrameFailure) {
+    callbackFn.invoke(sdkErrorResponse(request, eventName, failure.code, failure.details))
   }
 
   private fun drainEventQueue() {
@@ -307,7 +388,12 @@ internal class BlazeWebView @SuppressLint(
       invokeResult.put("methodResult", saveToStorage(key, value))
     } else if (methodName == "openApp") {
       val intentUri = paramsJson.optString("intentUri")
-      invokeResult.put("methodResult", openApp(intentUri))
+      if (canOpenApp(intentUri)) {
+        invokeResult.put("methodResult", openApp(intentUri))
+      } else {
+        Log.w("BlazeSDK: navigation: ", "Blocked openApp for ${originForLog(intentUri)}")
+        invokeResult.put("methodResult", "Blocked intent: only UPI payment links can be opened")
+      }
     } else if (methodName == "getFromStorage") {
       val key = paramsJson.optString("key")
       val value = getFromStorage(key)
