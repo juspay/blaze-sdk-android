@@ -8,6 +8,8 @@ import android.content.SharedPreferences
 import android.content.pm.ResolveInfo
 import android.graphics.Color
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
@@ -20,12 +22,15 @@ import android.widget.FrameLayout
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import `in`.breeze.blaze.security.NavigationDecision
+import `in`.breeze.blaze.security.WebViewHardening
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicReference
 import androidx.core.content.edit
+import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
 
@@ -53,27 +58,22 @@ internal class BlazeWebView @SuppressLint(
   private var consumingBackPress: Boolean = false
   private var eventQueue: HashMap<String, JSONObject> = hashMapOf()
   private val sharedPreferences: SharedPreferences
-  private var baseUrl: String = getBaseUrl(initiatePayload)
+  @Volatile
+  private var frame: FrameConfig = FrameConfig.from(initiatePayload)
+  private var baseUrl: String = frame.defaultUrl
+  @Volatile
+  private var initiateFailure: BlazeErrorCodes? = null
   private val frameLoadTarget: AtomicReference<BlazeWebView?> = AtomicReference(this)
 
   private val blazeWebViewClient = object : WebViewClient() {
 
     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-        val url = request?.url
-        if (url != null && isUPIIntentUri(url)) {
-            openApp(url.toString())
-            return true
-        }
-        return false
+        return handleNavigation(request?.url?.toString())
     }
 
     @Deprecated("Required for API < 24 compatibility")
     override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-        if (url != null && isUPIIntentUri(url.toUri())) {
-            openApp(url)
-            return true
-        }
-        return false
+        return handleNavigation(url)
     }
   }
 
@@ -84,6 +84,7 @@ internal class BlazeWebView @SuppressLint(
     this.webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
     this.webView.settings.domStorageEnabled = true
     this.webView.setBackgroundColor(Color.TRANSPARENT)
+    WebViewHardening.apply(this.webView)
     this.webView.webViewClient = blazeWebViewClient
     this.webView.addJavascriptInterface(this, "Native")
     ViewCompat.setOnApplyWindowInsetsListener(this.webView) { view, insets ->
@@ -97,17 +98,31 @@ internal class BlazeWebView @SuppressLint(
 
   private fun loadFrame(context: Activity) {
     val target = frameLoadTarget
-    BlazeConfig.resolveFrameUrl(
+    BlazeConfig.resolveFrame(
       context,
       getService(initiatePayload),
       getEnvironment(initiatePayload)
-    ) { frameUrl -> target.getAndSet(null)?.renderFrame(frameUrl) }
+    ) { remote -> target.getAndSet(null)?.renderFrame(remote) }
   }
 
-  private fun renderFrame(frameUrl: String?) {
-    if (frameUrl != null) {
-      baseUrl = frameUrl
+  private fun renderFrame(remote: RemoteFrame?) {
+    val resolved = when {
+      remote == null -> null
+      remote.allowedOrigins == null -> FrameConfig(remote.frameUrl ?: frame.defaultUrl, null)
+      remote.frameUrl == null -> null
+      else -> FrameConfig.locked(remote.frameUrl, remote.allowedOrigins)
     }
+    if (resolved == null) {
+      initiateFailure = if (remote?.frameUrl == null) {
+        BlazeErrorCodes.FRAME_URL_UNAVAILABLE
+      } else {
+        BlazeErrorCodes.INVALID_ALLOWED_ORIGIN
+      }
+      reportError("initiate", initiatePayload)
+      return
+    }
+    frame = resolved
+    baseUrl = resolved.defaultUrl
     val activity = contextRef.get() ?: return
     if (activity.isFinishing || activity.isDestroyed) {
       return
@@ -117,15 +132,17 @@ internal class BlazeWebView @SuppressLint(
 
 
   fun process(payload: JSONObject) {
+    if (initiateFailure != null) {
+      reportError("process", payload)
+      return
+    }
     this.sendEvent("process", payload)
   }
 
   fun handleBackPress(): Boolean {
     if (consumingBackPress) {
       contextRef.get()?.runOnUiThread {
-        val currentPageUrl = webView.url
-        val isBreezePage = currentPageUrl?.contains(baseUrl) ?: false
-        if (isBreezePage) {
+        if (frame.isFramePage(webView.url, baseUrl)) {
           this.sendEvent("backPress", JSONObject())
         } else if (webView.canGoBack()) {
           webView.goBack()
@@ -200,6 +217,38 @@ internal class BlazeWebView @SuppressLint(
       } else {
         eventQueue[event] = payload
       }
+    }
+  }
+
+  private fun handleNavigation(url: String?): Boolean {
+    if (url == null) {
+      return frame.isRestricted
+    }
+    if (isUPIIntentUri(url.toUri())) {
+      openApp(url)
+      return true
+    }
+    return frame.resolveNavigation(url) != NavigationDecision.ALLOW
+  }
+
+  private fun reportError(eventName: String, request: JSONObject) {
+    val response = if (initiateFailure == BlazeErrorCodes.FRAME_URL_UNAVAILABLE) {
+      sdkErrorResponse(
+        request,
+        eventName,
+        BlazeErrorCodes.FRAME_URL_UNAVAILABLE,
+        "sdk.json has no https address for this environment"
+      )
+    } else {
+      sdkErrorResponse(
+        request,
+        eventName,
+        BlazeErrorCodes.INVALID_ALLOWED_ORIGIN,
+        "allowedOrigins in sdk.json has an entry that is not an https origin"
+      )
+    }
+    Handler(Looper.getMainLooper()).post {
+      thread { this.callbackFn.invoke(response) }
     }
   }
 
@@ -305,7 +354,7 @@ internal class BlazeWebView @SuppressLint(
       val key = paramsJson.optString("key")
       val value = paramsJson.optString("value")
       invokeResult.put("methodResult", saveToStorage(key, value))
-    } else if (methodName == "openApp") {
+    } else if (methodName == "openApp" && !frame.isRestricted) {
       val intentUri = paramsJson.optString("intentUri")
       invokeResult.put("methodResult", openApp(intentUri))
     } else if (methodName == "getFromStorage") {
