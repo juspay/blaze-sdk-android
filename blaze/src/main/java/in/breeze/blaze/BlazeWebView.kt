@@ -13,9 +13,11 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -23,6 +25,7 @@ import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import `in`.breeze.blaze.security.NavigationDecision
+import `in`.breeze.blaze.security.NavigationPolicy
 import `in`.breeze.blaze.security.WebViewHardening
 import org.json.JSONArray
 import org.json.JSONObject
@@ -163,7 +166,28 @@ internal class BlazeWebView @SuppressLint(
       webView.stopLoading()
       webView.removeJavascriptInterface("Native")
       this.webView.destroy()
+      clearOriginData()
       eventQueue.clear()
+    }
+  }
+
+  private fun clearOriginData() {
+    if (!frame.isRestricted) {
+      return
+    }
+    val origin = NavigationPolicy.originOf(baseUrl) ?: return
+    try {
+      WebStorage.getInstance().deleteOrigin(origin)
+      val cookies = CookieManager.getInstance()
+      cookies.getCookie(origin)?.split(";")?.forEach { pair ->
+        val name = pair.substringBefore("=").trim()
+        if (name.isNotEmpty()) {
+          cookies.setCookie(origin, "$name=; Max-Age=0; Path=/")
+        }
+      }
+      cookies.flush()
+    } catch (e: Exception) {
+      Log.e("BlazeSDK: storage: ", e.message.toString())
     }
   }
 
@@ -350,14 +374,14 @@ internal class BlazeWebView @SuppressLint(
 
     val invokeResult = JSONObject().put("requestId", requestId).put("methodName", methodName)
 
-    if (methodName == "saveToStorage") {
+    if (methodName == "saveToStorage" && !frame.isRestricted) {
       val key = paramsJson.optString("key")
       val value = paramsJson.optString("value")
       invokeResult.put("methodResult", saveToStorage(key, value))
     } else if (methodName == "openApp" && !frame.isRestricted) {
       val intentUri = paramsJson.optString("intentUri")
       invokeResult.put("methodResult", openApp(intentUri))
-    } else if (methodName == "getFromStorage") {
+    } else if (methodName == "getFromStorage" && !frame.isRestricted) {
       val key = paramsJson.optString("key")
       val value = getFromStorage(key)
       invokeResult.put("methodResult", JSONObject().put("key", key).put("value", value))
