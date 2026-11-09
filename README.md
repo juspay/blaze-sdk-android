@@ -244,7 +244,7 @@ blaze.initiate(this, initSDKPayload, ::blazeCallbackHandler)
 | `publisherId` | Yes | Your publisher id, from the Breeze team |
 | `environment` | No | `beta` or `release`; picks which version of the assistant loads. Defaults to `release` |
 
-`merchantId` and `shopUrl` are not used. `initiate` shows nothing on screen: it loads the assistant in the background, so it opens quickly later. The callback then receives `eventName: "initiate"` with `status: "success"`, or `error: true` with the reason in `errorDetails`, for example `Missing publisherId in initiate payload`.
+`merchantId` and `shopUrl` are not used. `initiate` shows nothing on screen: it loads the assistant in the background, so it opens quickly later. The callback then receives `eventName: "initiate"` with `status: "success"`, or `error: true` with the reason in `errorDetails`, for example `Missing publisherId in initiate payload`. If the SDK refuses to load the page, the answer also has `errorCode`; see [Error codes](docs/error-codes.md).
 
 #### Open the assistant
 
@@ -270,7 +270,7 @@ The callback receives `eventName: "eventStream"` with `payload.event` set to `Pr
 | --- | --- |
 | `initiate` | In answer to `initiate` |
 | `eventStream`, with `payload.event` `ProcessStarted` | When the assistant opens, in answer to `process` |
-| `process`, with `error: true` | When the `process` payload could not be read |
+| `process`, with `error: true` | When the `process` payload could not be read, or `initiate` failed with `SDK_FRAME_URL_UNAVAILABLE` or `SDK_INVALID_ALLOWED_ORIGIN` |
 
 The assistant does not yet send events for the shopper's steps, or a `processResult` when the journey ends. When the shopper closes it, with its close button or a back press on its first screen, the SDK hides it but your app gets no callback. Call `process` again to reopen it.
 

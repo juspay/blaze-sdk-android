@@ -9,74 +9,104 @@ import androidx.core.content.edit
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+
+internal class RemoteFrame(val frameUrl: String?, val allowedOrigins: List<String>?)
 
 internal object BlazeConfig {
 
+  private class ConfigFile(
+    val url: String,
+    val prefsKey: String,
+    val isValid: (JSONObject) -> Boolean
+  )
+
   private val executor = Executors.newSingleThreadExecutor()
   private val mainHandler = Handler(Looper.getMainLooper())
+  private val cachedConfigs = ConcurrentHashMap<String, JSONObject>()
+  private val fetchedUrls: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
 
-  @Volatile
-  private var cachedConfig: JSONObject? = null
+  private val hasServices: (JSONObject) -> Boolean = { it.optJSONObject("services") != null }
 
-  @Volatile
-  private var hasFetched: Boolean = false
+  private val configFile = ConfigFile(
+    BlazeConstants.SDK_CONFIG_URL,
+    BlazeConstants.SDK_CONFIG_KEY,
+    hasServices
+  )
 
-  fun resolveFrameUrl(
+  fun resolveFrame(
     context: Context,
     service: String,
     environment: String,
-    callback: (frameUrl: String?) -> Unit
+    callback: (remote: RemoteFrame?) -> Unit
   ) {
-    val appContext = context.applicationContext
+    load(context.applicationContext, configFile) { config ->
+      callback(config?.let {
+        RemoteFrame(frameUrlFor(it, service, environment), originsFor(it, service, environment))
+      })
+    }
+  }
 
-    val inMemoryConfig = cachedConfig
+  private fun originsFor(config: JSONObject, service: String, environment: String): List<String>? {
+    val origins = config.optJSONObject("services")
+      ?.optJSONObject(service)
+      ?.optJSONObject("allowedOrigins")
+      ?.optJSONArray(environment) ?: return null
+    return (0 until origins.length()).map { origins.optString(it) }
+  }
+
+  private fun load(context: Context, file: ConfigFile, callback: (JSONObject?) -> Unit) {
+    val inMemoryConfig = cachedConfigs[file.url]
     if (inMemoryConfig != null) {
-      callback(frameUrlFor(inMemoryConfig, service, environment))
-      refresh(appContext)
+      callback(inMemoryConfig)
+      refresh(context, file)
       return
     }
 
     executor.execute {
-      val persistedConfig = loadPersistedConfig(appContext)
+      val persistedConfig = loadPersistedConfig(context, file)
       if (persistedConfig != null) {
-        cachedConfig = persistedConfig
+        cachedConfigs[file.url] = persistedConfig
       }
-      val config = persistedConfig ?: fetchAndStore(appContext)
-      mainHandler.post { callback(config?.let { frameUrlFor(it, service, environment) }) }
-      refresh(appContext)
+      val config = persistedConfig ?: fetchAndStore(context, file)
+      mainHandler.post { callback(config) }
+      refresh(context, file)
     }
   }
 
-  private fun refresh(context: Context) {
-    if (hasFetched) {
+  private fun refresh(context: Context, file: ConfigFile) {
+    if (file.url in fetchedUrls) {
       return
     }
-    executor.execute { fetchAndStore(context) }
+    executor.execute { fetchAndStore(context, file) }
   }
 
-  private fun fetchAndStore(context: Context): JSONObject? {
-    if (hasFetched) {
-      return cachedConfig
+  private fun fetchAndStore(context: Context, file: ConfigFile): JSONObject? {
+    if (!fetchedUrls.add(file.url)) {
+      return cachedConfigs[file.url]
     }
-    hasFetched = true
 
     try {
-      val config = fetchConfig()
+      val config = fetchConfig(file)
       if (config != null) {
-        persistConfig(prefs(context), config)
-        cachedConfig = config
+        prefs(context).edit { putString(file.prefsKey, config.toString()) }
+        cachedConfigs[file.url] = config
         return config
       }
     } catch (e: Exception) {
       Log.e("BlazeSDK: config: ", e.message.toString())
     }
-    return cachedConfig
+    fetchedUrls.remove(file.url)
+    return cachedConfigs[file.url]
   }
 
-  private fun loadPersistedConfig(context: Context): JSONObject? {
+  private fun loadPersistedConfig(context: Context, file: ConfigFile): JSONObject? {
     try {
-      return readPersistedConfig(prefs(context))
+      val config = prefs(context).getString(file.prefsKey, null) ?: return null
+      val configJson = safeParseJson(config)
+      return if (file.isValid(configJson)) configJson else null
     } catch (e: Exception) {
       Log.e("BlazeSDK: config: ", e.message.toString())
       return null
@@ -107,22 +137,27 @@ internal object BlazeConfig {
     return frameUrl
   }
 
-  private fun fetchConfig(): JSONObject? {
+  private fun fetchConfig(file: ConfigFile): JSONObject? {
     var connection: HttpURLConnection? = null
     try {
-      connection = (URL(BlazeConstants.SDK_CONFIG_URL).openConnection() as HttpURLConnection).apply {
+      connection = (URL(file.url).openConnection() as HttpURLConnection).apply {
         requestMethod = "GET"
         connectTimeout = BlazeConstants.SDK_CONFIG_TIMEOUT_MS
         readTimeout = BlazeConstants.SDK_CONFIG_TIMEOUT_MS
+        instanceFollowRedirects = false
         setRequestProperty("Accept", "application/json")
       }
       if (connection.responseCode !in 200..299) {
         Log.e("BlazeSDK: config: ", "Unexpected response ${connection.responseCode}")
         return null
       }
+      if (!isJson(connection.contentType)) {
+        Log.e("BlazeSDK: config: ", "Unexpected content type ${connection.contentType}")
+        return null
+      }
       val body = connection.inputStream.bufferedReader().use { it.readText() }
       val config = JSONObject(body)
-      return if (config.optJSONObject("services") == null) null else config
+      return if (file.isValid(config)) config else null
     } catch (e: Exception) {
       Log.e("BlazeSDK: config: ", e.message.toString())
       return null
@@ -131,15 +166,7 @@ internal object BlazeConfig {
     }
   }
 
-  private fun readPersistedConfig(prefs: SharedPreferences): JSONObject? {
-    val config = prefs.getString(BlazeConstants.SDK_CONFIG_KEY, null) ?: return null
-    val configJson = safeParseJson(config)
-    return if (configJson.optJSONObject("services") == null) null else configJson
-  }
-
-  private fun persistConfig(prefs: SharedPreferences, config: JSONObject) {
-    prefs.edit {
-      putString(BlazeConstants.SDK_CONFIG_KEY, config.toString())
-    }
+  private fun isJson(contentType: String?): Boolean {
+    return contentType?.trim()?.startsWith("application/json", ignoreCase = true) == true
   }
 }
