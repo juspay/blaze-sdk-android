@@ -13,6 +13,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -52,6 +53,7 @@ internal class BlazeWebView @SuppressLint(
   @Volatile
   private var isTerminated: Boolean = false
   private var lastSafeMargin: SafeMargin? = null
+  private var addedSecureFlag: Boolean = false
   private val safeMarginLayoutListener =
     View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sendSafeMarginIfChanged() }
   @Volatile
@@ -304,7 +306,28 @@ internal class BlazeWebView @SuppressLint(
         getContainer()?.addView(webView)
         ViewCompat.requestApplyInsets(webView)
       }
+      protectScreen()
     }
+  }
+
+  private fun protectScreen() {
+    if (!frame.isRestricted || addedSecureFlag) {
+      return
+    }
+    val window = contextRef.get()?.window ?: return
+    if (window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0) {
+      return
+    }
+    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    addedSecureFlag = true
+  }
+
+  private fun releaseScreen() {
+    if (!addedSecureFlag) {
+      return
+    }
+    contextRef.get()?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    addedSecureFlag = false
   }
 
   private fun getSafeMargin(): SafeMargin {
@@ -339,6 +362,7 @@ internal class BlazeWebView @SuppressLint(
     contextRef.get()?.runOnUiThread {
       this.webView.layoutParams = FrameLayout.LayoutParams(0, 0)
       getContainer()?.removeView(webView)
+      releaseScreen()
     }
   }
 
