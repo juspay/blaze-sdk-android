@@ -21,10 +21,6 @@ fun getService(payload: JSONObject): String {
 }
 
 fun getBaseUrl(payload: JSONObject): String {
-    if (getService(payload) == "in.breeze.shop") {
-        return "https://shop.breeze.in/sdk"
-    }
-
     val environment = getEnvironment(payload)
     return if (environment == "smbBeta") {
         "https://app.beta.v2.breezesdk.store"
@@ -37,7 +33,32 @@ fun getBaseUrl(payload: JSONObject): String {
     }
 }
 
+internal fun sdkErrorResponse(
+    request: JSONObject,
+    eventName: String,
+    error: BlazeErrorCodes,
+    errorDetails: String
+): JSONObject {
+    val payload = JSONObject()
+        .put("eventName", eventName)
+        .put("action", JSONObject.NULL)
+        .put("status", JSONObject.NULL)
+        .put("methodName", JSONObject.NULL)
+        .put("params", JSONObject.NULL)
+        .put("event", JSONObject.NULL)
+        .put("error", true)
+        .put("errorDetails", errorDetails)
+        .put("errorCode", error.code)
+    return JSONObject()
+        .put("requestId", request.optString("requestId"))
+        .put("service", getService(request))
+        .put("payload", payload)
+}
+
 fun isUPIIntentUri(uri: Uri): Boolean {
+    if (!uri.isHierarchical) {
+        return false
+    }
     val scheme = uri.scheme?.lowercase() ?: return false
     val queryParams = uri.queryParameterNames.associateBy(
         keySelector = { name -> name.lowercase() },
