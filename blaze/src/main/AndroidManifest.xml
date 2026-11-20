@@ -8,5 +8,32 @@
           android:pathPattern=".*"
           android:scheme="upi" />
     </intent>
+    <intent>
+      <action android:name="android.support.customtabs.action.CustomTabsService" />
+    </intent>
+    <intent>
+      <action android:name="android.intent.action.VIEW" />
+      <category android:name="android.intent.category.BROWSABLE" />
+      <data android:scheme="https" />
+    </intent>
   </queries>
+  <application>
+    <activity
+        android:name=".browser.BrowserFlowActivity"
+        android:exported="false"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+    <activity
+        android:name=".browser.BrowserRedirectActivity"
+        android:exported="true"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data
+            android:host="callback"
+            android:scheme="${applicationId}.blaze" />
+      </intent-filter>
+    </activity>
+  </application>
 </manifest>

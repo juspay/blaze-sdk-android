@@ -16,6 +16,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.core.net.toUri
+import `in`.breeze.blaze.browser.BrowserFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
@@ -118,6 +119,7 @@ internal class BlazeWebView @SuppressLint(
 
   fun terminate() {
     frameLoadTarget.set(null)
+    BrowserFlow.clear()
     this.sendEvent("terminate", JSONObject())
     hideView()
     contextRef.get()?.runOnUiThread {
@@ -233,6 +235,11 @@ internal class BlazeWebView @SuppressLint(
     } else if (methodName == "findApps") {
       val payload = paramsJson.optString("payload")
       invokeResult.put("methodResult", findApps(payload))
+    } else if (methodName == "openBrowserFlow") {
+      BrowserFlow.open(contextRef.get(), paramsJson.optString("url")) { result ->
+        sendEvent("invokeMethodResult", JSONObject(invokeResult.toString()).put("methodResult", result))
+      }
+      return
     } else {
       invokeResult.put("methodResult", "Method not found")
     }
